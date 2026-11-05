@@ -1,4 +1,5 @@
 using System;
+using System.Reflection;
 using UnityEngine.Rendering.RenderGraphModule;
 using NameAndTooltip = UnityEngine.Rendering.DebugUI.Widget.NameAndTooltip;
 
@@ -7,6 +8,8 @@ namespace UnityEngine.Rendering
     /// <summary>
     /// Render Graph-related Rendering Debugger settings.
     /// </summary>
+    [PipelineHelpURL("UniversalRenderPipelineAsset", pageName: "urp/features/rendering-debugger-reference", pageHash: "render-graph")]
+    [PipelineHelpURL("HDRenderPipelineAsset", pageName: "rendering-debugger-window-reference", pageHash: "render-graph")]
     class DebugDisplaySettingsRenderGraph : IDebugDisplaySettingsData
     {
         public DebugDisplaySettingsRenderGraph()
@@ -17,24 +20,31 @@ namespace UnityEngine.Rendering
             }
         }
 
-        [DisplayInfo(name = "Render Graph", order = 10)]
+        [DisplayInfo(name = "Rendering", order = 10)]
         private class SettingsPanel : DebugDisplaySettingsPanel
         {
-            public override string PanelName => "Render Graph";
             public SettingsPanel(DebugDisplaySettingsRenderGraph _)
             {
+                DocumentationUtils.TryGetHelpURL(typeof(DebugDisplaySettingsRenderGraph), out var documentationUrl);
+                var foldout = new DebugUI.Foldout()
+                {
+                    displayName = "Render Graph",
+                    documentationUrl = documentationUrl
+                };
+                AddWidget(foldout);
+
                 bool usingRenderGraph = false;
                 foreach (var graph in RenderGraph.GetRegisteredRenderGraphs())
                 {
                     usingRenderGraph = true;
                     var list = graph.GetWidgetList();
                     foreach (var item in list)
-                        AddWidget(item);
+                        foldout.children.Add(item);
                 }
 
                 if (!usingRenderGraph)
                 {
-                    AddWidget(new DebugUI.MessageBox()
+                    foldout.children.Add(new DebugUI.MessageBox()
                     {
                         displayName =
                             "Warning: The current render pipeline does not have Render Graphs Registered",
@@ -56,7 +66,7 @@ namespace UnityEngine.Rendering
         {
             get
             {
-                foreach (var graph in RenderGraph.GetRegisteredRenderGraphs())
+                foreach (var (graph, _) in RenderGraph.GetRegisteredExecutions())
                 {
                     if (graph.areAnySettingsActive)
                         return true;

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Runtime.CompilerServices;
 using Unity.Collections;
 using UnityEditor;
@@ -8,7 +9,7 @@ using UnityEngine.LightTransport;
 using UnityEngine.LightTransport.PostProcessing;
 using UnityEngine.Rendering.Sampling;
 using UnityEngine.Rendering.UnifiedRayTracing;
-
+using UnityEngine.SceneManagement;
 using TouchupVolumeWithBoundsList = System.Collections.Generic.List<(UnityEngine.Rendering.ProbeReferenceVolume.Volume obb, UnityEngine.Bounds aabb, UnityEngine.Rendering.ProbeAdjustmentVolume volume)>;
 
 namespace UnityEngine.Rendering
@@ -93,7 +94,7 @@ namespace UnityEngine.Rendering
 
             public override void Initialize(bool bakeProbeOcclusion, NativeArray<Vector3> probePositions)
             {
-                if (!InputExtraction.ExtractFromScene(out input))
+                if (!InputExtraction.ExtractFromScene(out input, true))
                 {
                     Debug.LogError("InputExtraction.ExtractFromScene failed.");
                     return;
@@ -148,13 +149,6 @@ namespace UnityEngine.Rendering
                 finally
                 {
                     context.Dispose();
-                }
-
-                // Fixup lighting for probes part of bricks with different subdivision levels
-                // When baking reflection probes, we want to skip this step
-                if (m_BakingBatch != null)
-                {
-                    FixSeams(s_BakeData.positionRemap, positions, irradiance, validity, renderingLayerMasks);
                 }
 
                 return true;
@@ -584,13 +578,16 @@ namespace UnityEngine.Rendering
             }
         }
 
+        // The contribution from all Baked and Mixed lights in the scene should be disabled to avoid double contribution.
         static void UpdateLightStatus()
         {
             var lightingSettings = ProbeVolumeLightingTab.GetLightingSettings();
 
-            // The contribution from all Baked and Mixed lights in the scene should be disabled to avoid double contribution.
-            var lights = Object.FindObjectsByType<Light>(FindObjectsSortMode.None);
-            foreach (var light in lights)
+            var sceneLights = new Dictionary<Scene, List<Light>>();
+
+            // Modify each baked light, take note of which scenes they belong to.
+            var allLights = Object.FindObjectsByType<Light>(FindObjectsSortMode.None);
+            foreach (var light in allLights)
             {
                 if (light.lightmapBakeType != LightmapBakeType.Realtime)
                 {
@@ -599,6 +596,56 @@ namespace UnityEngine.Rendering
                     bakingOutput.lightmapBakeType = light.lightmapBakeType;
                     bakingOutput.mixedLightingMode = lightingSettings.mixedBakeMode;
                     light.bakingOutput = bakingOutput;
+                }
+
+                // Take note of the lights from each scene
+                var scene = light.gameObject.scene;
+                if (!sceneLights.TryGetValue(scene, out var sceneLightList))
+                {
+                    sceneLightList = new List<Light>();
+                    sceneLights.Add(scene, sceneLightList);
+                }
+                sceneLightList.Add(light);
+            }
+
+            // Now we make the modifications persistent by modifying Lighting Data Assets (LDA) on disk.
+            string ldaFolderPath = Path.GetDirectoryName(AssetDatabase.GetAssetPath(m_BakingSet));
+            for (int i = 0; i < m_BakingSet.sceneGUIDs.Count; i++)
+            {
+                string guid = m_BakingSet.sceneGUIDs[i];
+                Scene scene = SceneManager.GetSceneByPath(AssetDatabase.GUIDToAssetPath(guid));
+                if (!scene.isLoaded)
+                    continue;
+
+                LightingDataAsset prevLDA = Lightmapping.GetLightingDataAssetForScene(scene);
+                LightingDataAsset newLDA = prevLDA;
+
+                // If the scene has no (modifiable) LDA, create a new one.
+                bool isDefaultLDA = prevLDA && prevLDA.hideFlags.HasFlag(HideFlags.NotEditable);
+                if (prevLDA == null || isDefaultLDA)
+                {
+                    newLDA = new LightingDataAsset(scene);
+                }
+
+                // Update the LDA with the new light settings
+                if (sceneLights.TryGetValue(scene, out var lights))
+                    newLDA.SetLights(lights.ToArray());
+                else
+                    newLDA.SetLights(Array.Empty<Light>());
+
+                // If the scene was using the builtin/default LDA before, copy over environment lighting, so it doesn't change.
+                if (prevLDA != null)
+                {
+                    newLDA.SetAmbientProbe(prevLDA.GetAmbientProbe());
+                    newLDA.SetDefaultReflectionCubemap(prevLDA.GetDefaultReflectionCubemap());
+                }
+
+                // Save the LDA to disk and assign it to the scene.
+                if (newLDA != prevLDA)
+                {
+                    string ldaPath = $"{ldaFolderPath}/LightingData-{i}.asset".Replace('\\', '/');
+                    AssetDatabase.CreateAsset(newLDA, ldaPath);
+                    Lightmapping.SetLightingDataAssetForScene(scene, newLDA);
                 }
             }
         }
@@ -616,7 +663,7 @@ namespace UnityEngine.Rendering
             static IRayTracingShader m_ShaderSO = null;
             static IRayTracingShader m_ShaderRL = null;
 
-            const string k_PackageLightTransport = "Packages/com.unity.rendering.light-transport";
+            const string k_PackageLightTransport = "Packages/com.unity.render-pipelines.core";
 
             internal AccelStructAdapter CreateAccelerationStructure()
             {
@@ -713,7 +760,7 @@ namespace UnityEngine.Rendering
                     m_SamplingResources.Load();
                 }
 
-                SamplingResources.BindSobolBlueNoiseTextures(cmd, m_SamplingResources);
+                SamplingResources.Bind(cmd, m_SamplingResources);
             }
 
             public bool TryGetMeshForAccelerationStructure(Renderer renderer, out Mesh mesh)
@@ -820,7 +867,7 @@ namespace UnityEngine.Rendering
                 bakingSet.useRenderingLayers = bakingSet.bakedMaskCount == 1 ? false : true;
 
                 m_BakingSet = bakingSet;
-                m_BakingBatch = new BakingBatch(cellCount);
+                m_BakingBatch = new BakingBatch(cellCount, ProbeReferenceVolume.instance);
                 m_ProfileInfo = new ProbeVolumeProfileInfo();
                 ModifyProfileFromLoadedData(m_BakingSet);
                 m_CellPosToIndex.Clear();
@@ -958,27 +1005,36 @@ namespace UnityEngine.Rendering
 
                 if (!failed)
                 {
-                    for (int c = 0; c < bakingCells.Length; c++)
+                    // Validate baking cells size before any global state modifications
+                    var chunkSizeInProbes = ProbeBrickPool.GetChunkSizeInProbeCount();
+                    var hasVirtualOffsets = m_BakingSet.settings.virtualOffsetSettings.useVirtualOffset;
+                    var hasRenderingLayers = m_BakingSet.useRenderingLayers;
+                    
+                    if (ValidateBakingCellsSize(bakingCells, chunkSizeInProbes, hasVirtualOffsets, hasRenderingLayers))
                     {
-                        ref var cell = ref bakingCells[c];
-                        ComputeValidityMasks(cell);
-                    }
+                        for (int c = 0; c < bakingCells.Length; c++)
+                        {
+                            ref var cell = ref bakingCells[c];
+                            ComputeValidityMasks(cell);
+                        }
 
-                    // Write result to disk
-                    WriteBakingCells(bakingCells);
+                        // Attempt to write the result to disk
+                        if (WriteBakingCells(bakingCells))
+                        {
+                            // Reload everything
+                            AssetDatabase.SaveAssets();
+                            AssetDatabase.Refresh();
 
-                    // Reload everything
-                    AssetDatabase.SaveAssets();
-                    AssetDatabase.Refresh();
+                            if (m_BakingSet.hasDilation)
+                            {
+                                // Force reloading of data
+                                foreach (var data in prv.perSceneDataList)
+                                    data.Initialize();
 
-                    if (m_BakingSet.hasDilation)
-                    {
-                        // Force reloading of data
-                        foreach (var data in prv.perSceneDataList)
-                            data.Initialize();
-
-                        InitDilationShaders();
-                        PerformDilation();
+                                InitDilationShaders();
+                                PerformDilation();
+                            }
+                        }
                     }
                 }
             }
@@ -998,6 +1054,7 @@ namespace UnityEngine.Rendering
                 bakingSet.settings.virtualOffsetSettings.useVirtualOffset = savedVirtualOffset;
                 bakingSet.useRenderingLayers = savedRenderingLayers;
 
+                m_BakingBatch?.Dispose();
                 m_BakingBatch = null;
                 m_BakingSet = null;
             }

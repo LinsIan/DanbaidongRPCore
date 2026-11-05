@@ -170,7 +170,17 @@ class ThreadingEmulationFunctionTests : IPrebuildSetup
             Assert.Ignore($"The device's max compute group size X dimension ({deviceMaxComputeGroupSizeX}) does not meet the minimum requirement ({requiredComputeGroupSizeX}) for this test");
     }
 
+    [SetUp]
+    public void SetupIgnores()
+    {
+        if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.WebGPU)
+        {
+            Assert.Ignore("These tests are not supported on WebGPU");
+        }
+    }
+
     [Test]
+    [UnityPlatform(exclude = new[] { RuntimePlatform.WindowsEditor, RuntimePlatform.WSAPlayerX64, RuntimePlatform.WindowsPlayer })] //https://jira.unity3d.com/browse/UUM-78016
     public void WaveTest([Values]Kernel kernel, [Values]WaveSizeKeyword waveSizeKeyword)
     {
         int groupSize = (int)GroupSizeKeyword.GROUP_SIZE_128;

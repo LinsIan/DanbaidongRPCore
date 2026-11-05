@@ -109,11 +109,29 @@ namespace UnityEngine.Rendering
             public int _ProbeCountInChunkSlice;
         }
 
+        internal struct BufferLayoutBuilder
+        {
+            int _Offset;
+
+            public BufferLayoutBuilder(int initialOffset = 0)
+            {
+                _Offset = initialOffset;
+            }
+
+            public int AddBlock(int blockSize)
+            {
+                int currentOffset = _Offset;
+                _Offset += blockSize;
+                return currentOffset;
+            }
+        }
+
         internal class CellStreamingScratchBuffer
         {
             public CellStreamingScratchBuffer(int chunkCount, int chunkSize, bool allocateGraphicsBuffers)
             {
                 this.chunkCount = chunkCount;
+                this.chunkSize = chunkSize;
 
                 // With a stride of 4 (one uint)
                 // Number of elements for chunk data: chunkCount * chunkSize / 4
@@ -152,6 +170,7 @@ namespace UnityEngine.Rendering
             public GraphicsBuffer buffer => m_GraphicsBuffers[m_CurrentBuffer];
             public NativeArray<byte> stagingBuffer; // Contains data streamed from disk. To be copied into the graphics buffer.
             public int chunkCount { get; }
+            public int chunkSize { get; }
 
             int m_CurrentBuffer;
             GraphicsBuffer[] m_GraphicsBuffers = new GraphicsBuffer[2];
@@ -1231,7 +1250,7 @@ namespace UnityEngine.Rendering
 
             var brickDataAsset = m_CurrentBakingSet.cellBricksDataAsset;
             cellStreamingDesc = brickDataAsset.streamableCellDescs[cellIndex];
-            request.brickStreamingRequest.AddReadCommand(cellStreamingDesc.offset, brickDataAsset.elementSize * cellStreamingDesc.elementCount, (byte*)cellData.bricks.GetUnsafePtr());
+            request.brickStreamingRequest.AddReadCommand(cellStreamingDesc.offset, brickDataAsset.elementSize * Mathf.Min(cellStreamingDesc.elementCount, cellDesc.bricksCount), (byte*)cellData.bricks.GetUnsafePtr());
             request.brickStreamingRequest.RunCommands(brickDataAsset.OpenFile());
 
             // Support Data
@@ -1448,6 +1467,11 @@ namespace UnityEngine.Rendering
                 if (m_ToBeLoadedCells.size == 0 && m_ActiveStreamingRequests.Count == 0)
                     UnloadAllCells();
             }
+        }
+
+        bool HasActiveStreamingRequest(Cell cell)
+        {
+            return diskStreamingEnabled && m_ActiveStreamingRequests.Exists(x => x.cell == cell);
         }
 
         [Conditional("UNITY_EDITOR")]

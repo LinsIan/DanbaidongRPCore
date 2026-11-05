@@ -140,19 +140,19 @@ namespace UnityEditor.Rendering
         static List<Type> GetTypesMissingFromDefaultProfile(VolumeProfile profile)
         {
             List<Type> missingTypes = new List<Type>();
-            var volumeComponentTypes = VolumeManager.instance.baseComponentTypeArray;
+
+            var volumeComponentTypes = VolumeManager.instance.isInitialized ?
+                VolumeManager.instance.baseComponentTypeArray : VolumeManager.instance.LoadBaseTypesByReflection(GraphicsSettings.currentRenderPipelineAssetType);
             foreach (var type in volumeComponentTypes)
             {
                 if (profile.components.Find(c => c.GetType() == type) == null)
                 {
-                    if (type.IsDefined(typeof(ObsoleteAttribute), false) ||
-                        type.IsDefined(typeof(HideInInspector), false))
+                    if (type.IsDefined(typeof(ObsoleteAttribute), false))
                         continue;
 
                     missingTypes.Add(type);
                 }
             }
-
             return missingTypes;
         }
 
@@ -163,13 +163,14 @@ namespace UnityEditor.Rendering
         /// <param name="profile">VolumeProfile to use.</param>
         /// <param name="defaultValueSource">An optional VolumeProfile asset containing default values to use for
         /// any components that are added to <see cref="profile"/>.</param>
-        public static void EnsureAllOverridesForDefaultProfile(VolumeProfile profile, VolumeProfile defaultValueSource = null)
+        public static void EnsureAllOverridesForDefaultProfile(VolumeProfile profile, VolumeProfile defaultValueSource = null) => TryEnsureAllOverridesForDefaultProfile(profile, defaultValueSource);
+        internal static bool TryEnsureAllOverridesForDefaultProfile(VolumeProfile profile, VolumeProfile defaultValueSource = null)
         {
             // It's possible that the volume profile is assigned to the default asset inside the HDRP package. In
             // this case it cannot be modified. User is expected to use HDRP Wizard "Fix" to create a local profile.
             var path = AssetDatabase.GetAssetPath(profile);
             if (CoreEditorUtils.IsAssetInReadOnlyPackage(path))
-                return;
+                return false;
 
             bool changed = false;
             int numComponentsBefore = profile.components.Count;
@@ -240,9 +241,9 @@ namespace UnityEditor.Rendering
             {
                 VolumeManager.instance.OnVolumeProfileChanged(profile);
                 EditorUtility.SetDirty(profile);
-                AssetDatabase.SaveAssets();
-                AssetDatabase.Refresh();
             }
+
+            return changed;
         }
 
         /// <summary>
@@ -327,7 +328,7 @@ namespace UnityEditor.Rendering
                 if (VolumeComponentCopyPaste.CanPaste(volumeProfile.components))
                     menu.AddItem(Styles.pasteSettings, false, () =>
                     {
-                        VolumeComponentCopyPaste.PasteSettings(volumeProfile.components);
+                        VolumeComponentCopyPaste.PasteSettings(volumeProfile.components, volumeProfile);
                         VolumeManager.instance.OnVolumeProfileChanged(volumeProfile);
                     });
                 else
@@ -413,7 +414,7 @@ namespace UnityEditor.Rendering
                 if (VolumeComponentCopyPaste.CanPaste(volumeProfile.components))
                     menu.AddItem(Styles.pasteSettings, false, () =>
                     {
-                        VolumeComponentCopyPaste.PasteSettings(volumeProfile.components);
+                        VolumeComponentCopyPaste.PasteSettings(volumeProfile.components, volumeProfile);
                         VolumeManager.instance.OnVolumeProfileChanged(volumeProfile);
                     });
                 else

@@ -55,10 +55,10 @@ namespace UnityEngine.Rendering.Tests
         }
     }
 
-    // Fails on WebGL and Oculus Quest.
+    // Fails on WebGL, Oculus Quest and Switch.
     // Unfortunately, there is no good way to exclude Oculus Quest from the test without excluding all Android devices.
     // https://jira.unity3d.com/browse/GFXFOUND-559
-    [UnityPlatform(exclude = new RuntimePlatform[] { RuntimePlatform.WebGLPlayer, RuntimePlatform.Android })]
+    [UnityPlatform(exclude = new RuntimePlatform[] { RuntimePlatform.WebGLPlayer, RuntimePlatform.Android, RuntimePlatform.Switch })]
     class RuntimeProfilerTests : RuntimeProfilerTestBase
     {
         [UnityTest]
@@ -69,6 +69,15 @@ namespace UnityEngine.Rendering.Tests
                 && SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLCore)
                 {
                     Assert.Ignore("Test is failing on Linux OpenGLCore. https://jira.unity3d.com/browse/GFXFOUND-559");
+                }
+
+            // The EmbeddedLinux OpenGLES3 CI device (Raspberry Pi V3D / Mesa GLES 3.1) does not expose
+            // GL_EXT_disjoint_timer_query, so GPU frame timing is always zero there.
+            if ((Application.platform == RuntimePlatform.EmbeddedLinuxArm64 ||
+                 Application.platform == RuntimePlatform.EmbeddedLinuxX64)
+                && SystemInfo.graphicsDeviceType == GraphicsDeviceType.OpenGLES3)
+                {
+                    Assert.Ignore("GPU frame timing is not supported on EmbeddedLinux GLES (no GL_EXT_disjoint_timer_query), skipping test.");
                 }
 
             yield return Warmup();
