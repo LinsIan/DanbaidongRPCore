@@ -26,12 +26,14 @@ namespace UnityEngine.Rendering
     /// <summary>
     /// An Asset which holds a set of settings to use with a <see cref="Probe Reference Volume"/>.
     /// </summary>
+    [CoreRPHelpURL("probevolumes-usebakingsets", "com.unity.render-pipelines.high-definition")]
     public sealed partial class ProbeVolumeBakingSet : ScriptableObject, ISerializationCallbackReceiver
     {
         internal enum Version
         {
             Initial,
-            RemoveProbeVolumeSceneData
+            RemoveProbeVolumeSceneData,
+            AssetsAlwaysReferenced,
         }
 
         [Serializable]
@@ -91,7 +93,7 @@ namespace UnityEngine.Rendering
 
         // We keep a separate list with only the guids for the sake of convenience when iterating from outside this class.
         [SerializeField] private List<string> m_SceneGUIDs = new List<string>();
-        [SerializeField, Obsolete("This is now contained in the SceneBakeData structure"), FormerlySerializedAs("scenesToNotBake")] internal List<string> obsoleteScenesToNotBake = new List<string>();
+        [SerializeField, Obsolete("This is now contained in the SceneBakeData structure. #from(2023.3)"), FormerlySerializedAs("scenesToNotBake")] internal List<string> obsoleteScenesToNotBake = new List<string>();
         [SerializeField, FormerlySerializedAs("lightingScenarios")] internal List<string> m_LightingScenarios = new List<string>();
 
         /// <summary>The list of scene GUIDs.</summary>
@@ -345,6 +347,28 @@ namespace UnityEngine.Rendering
 #endif
                 }
 
+                // Upgrade baking sets from before we always stored asset references.
+                if (version < Version.AssetsAlwaysReferenced && ProbeReferenceVolume.instance.isInitialized)
+                {
+#if UNITY_EDITOR
+                    cellBricksDataAsset.EnsureAssetLoaded();
+                    cellSharedDataAsset.EnsureAssetLoaded();
+                    cellSupportDataAsset.EnsureAssetLoaded();
+                    foreach (var scenario in scenarios)
+                    {
+                        scenario.Value.cellDataAsset.EnsureAssetLoaded();
+                        scenario.Value.cellOptionalDataAsset.EnsureAssetLoaded();
+                        scenario.Value.cellProbeOcclusionDataAsset.EnsureAssetLoaded();
+                    }
+
+                    version = Version.AssetsAlwaysReferenced;
+
+                    // Save immediately since these references must be written to disk for certain functionality
+                    // to work, such as exporting a .unitypackage. Changing in memory is not enough.
+                    UnityEditor.EditorUtility.SetDirty(this);
+                    UnityEditor.AssetDatabase.SaveAssetIfDirty(this);
+#endif
+                }
 #pragma warning restore 618
             }
 
@@ -645,18 +669,45 @@ namespace UnityEngine.Rendering
             }
         }
 
+        private unsafe bool FileExists(string path)
+        {
+            // Can't use System.IO.File.Exists as it doesn't work with compressed streaming assets folder (iOS, Android)
+            FileInfoResult infoResult;
+            ReadHandle h = AsyncReadManager.GetFileInfo(path, &infoResult);
+            h.JobHandle.Complete();
+            return infoResult.FileState == FileState.Exists;
+        }
+
         // Load from disk all data related to the required cells only.
         // This allows us to avoid loading the whole file in memory which could be a huge spike for multi scene setups.
         unsafe NativeArray<T> LoadStreambleAssetData<T>(ProbeVolumeStreamableAsset asset, List<int> cellIndices) where T : struct
         {
             if (!m_UseStreamingAsset)
             {
-                // Only when not using Streaming Asset is this reference valid.
                 Debug.Assert(asset.asset != null);
                 return asset.asset.GetData<byte>().Reinterpret<T>(1);
             }
             else
             {
+                if (!FileExists(asset.GetAssetPath()))
+                {
+                    asset.RefreshAssetPath();
+                    if (!FileExists(asset.GetAssetPath()))
+                    {
+                        // If we can't load from StreamingAssets, but we have a valid asset reference, try to use the asset reference instead.
+                        if (asset.HasValidAssetReference())
+                        {
+                            return asset.asset.GetData<byte>().Reinterpret<T>(1);
+                        }
+                        else
+                        {
+                            Debug.LogAssertion($"File {asset.GetAssetPath()} does not exist on disk. If you are trying to load Adaptive Probe Volumes from AssetBundles or Addressables, " +
+                                               "tick the \"Probe Volume Disable Streaming Assets\" project setting in the Graphics tab when building the Player.");
+                            return default;
+                        }
+                    }
+                }
+
                 // Prepare read commands.
                 // Reallocate read commands buffer if needed.
                 if (!m_ReadCommandBuffer.IsCreated || m_ReadCommandBuffer.Length < cellIndices.Count)
@@ -718,13 +769,13 @@ namespace UnityEngine.Rendering
                 m_ReadOperationScratchBuffers.Push(buffer.Reinterpret<byte>(UnsafeUtility.SizeOf<T>()));
         }
 
-        void PruneCellIndexList(List<int> cellIndices, List<int> prunedIndexList)
+        internal void PruneCellIndexList(List<int> cellIndices, List<int> prunedIndexList)
         {
             prunedIndexList.Clear();
             foreach (var cellIndex in cellIndices)
             {
                 // When clearing data only partially (ie: not all scenes are loaded), there can be left over indices here but no cells in the set.
-                if (!cellDataMap.ContainsKey(cellIndex))
+                if (!cellDataMap.ContainsKey(cellIndex) && cellDescs.ContainsKey(cellIndex))
                 {
                     prunedIndexList.Add(cellIndex);
                 }
@@ -1064,6 +1115,20 @@ namespace UnityEngine.Rendering
                 size += ProbeOcclusionChunkSize;
 
             return size;
+        }
+
+        internal bool HasSameSceneGUIDs(ProbeVolumeBakingSet other)
+        {
+            var otherSceneGUIDs = other.sceneGUIDs;
+            if (m_SceneGUIDs.Count != otherSceneGUIDs.Count)
+                return false;
+
+            for (var i = 0; i < m_SceneGUIDs.Count; ++i)
+            {
+                if (m_SceneGUIDs[i] != otherSceneGUIDs[i])
+                    return false;
+            }
+            return true;
         }
     }
 }

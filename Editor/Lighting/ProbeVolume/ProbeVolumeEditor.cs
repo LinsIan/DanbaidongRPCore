@@ -123,7 +123,7 @@ namespace UnityEditor.Rendering
                 var k_EnsureFrameSetting = Type.GetType("UnityEditor.Rendering.HighDefinition.HDEditorUtils,Unity.RenderPipelines.HighDefinition.Editor")
                     .GetMethod("EnsureFrameSetting", BindingFlags.Static | BindingFlags.NonPublic);
 
-                k_EnsureFrameSetting.Invoke(null, new object[] { k_APVFrameSetting, "Adaptive Probe Volumes" });
+                k_EnsureFrameSetting.Invoke(null, new object[] { k_APVFrameSetting});
             }
         }
 
@@ -148,7 +148,7 @@ namespace UnityEditor.Rendering
 
             if (ProbeVolumeLightingTab.GetLightingSettings().realtimeGI)
             {
-                EditorGUILayout.HelpBox("Adaptive Probe Volumes are not supported when using Enlighten.", MessageType.Warning, wide: true);
+                EditorGUILayout.HelpBox("Adaptive Probe Volumes are not supported when using Realtime Global Illumination(Enlighten).", MessageType.Warning, wide: true);
                 drawInspector = false;
             }
 

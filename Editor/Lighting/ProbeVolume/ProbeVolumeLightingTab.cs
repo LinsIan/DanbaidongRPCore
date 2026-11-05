@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using System.Reflection;
 using System.Collections.Generic;
+using System.IO;
 using UnityEditor;
 using UnityEditor.Rendering;
 using UnityEditor.SceneManagement;
@@ -101,7 +102,7 @@ namespace UnityEngine.Rendering
             }
         }
 
-        public static ProbeVolumeLightingTab instance;
+        public static ProbeVolumeLightingTab instance = new();
 
         public static bool singleSceneMode => instance?.m_SingleSceneMode ?? true;
 
@@ -111,18 +112,18 @@ namespace UnityEngine.Rendering
         bool m_TempBakingSet = false;
         bool m_Initialized = false;
 
-        ProbeVolumeBakingSet m_ActiveSet;
+        ProbeVolumeBakingSetWeakReference m_ActiveSet = new();
         ProbeVolumeBakingSet activeSet
         {
-            get => m_ActiveSet;
+            get => m_ActiveSet.Get();
             set
             {
-                if (ReferenceEquals(m_ActiveSet, value)) return;
-                if (m_TempBakingSet) Object.DestroyImmediate(m_ActiveSet);
-                m_ActiveSet = value;
+                if (ReferenceEquals(m_ActiveSet.Get(), value)) return;
+                if (m_TempBakingSet) Object.DestroyImmediate(m_ActiveSet.Get());
+                m_ActiveSet.Set(value);
                 m_TempBakingSet = false;
-                if (m_ActiveSet == null) return;
-                m_SingleSceneMode = m_ActiveSet.singleSceneMode;
+                if (m_ActiveSet.Get() == null) return;
+                m_SingleSceneMode = m_ActiveSet.Get().singleSceneMode;
                 InitializeSceneList();
             }
         }
@@ -168,14 +169,14 @@ namespace UnityEngine.Rendering
 
         bool FindActiveSet()
         {
-            if (m_ActiveSet == null)
+            if (m_ActiveSet.Get() == null)
             {
                 activeSet = ProbeVolumeBakingSet.GetBakingSetForScene(SceneManager.GetActiveScene());
                 for (int i = 0; activeSet == null && i < SceneManager.sceneCount; i++)
                     activeSet = ProbeVolumeBakingSet.GetBakingSetForScene(SceneManager.GetSceneAt(i));
             }
 
-            return m_ActiveSet != null;
+            return m_ActiveSet.Get() != null;
         }
 
         void Initialize()
@@ -220,6 +221,7 @@ namespace UnityEngine.Rendering
             Initialize();
 
             var prv = ProbeReferenceVolume.instance;
+
             // In single scene mode, user can't control active set, so we automatically create a new one
             // in case the active scene doesn't have a baking set so that we can display baking settings
             // Clone the current activeSet if possible so that it's seamless when eg. duplicating a scene
@@ -341,7 +343,11 @@ namespace UnityEngine.Rendering
             m_SingleSceneMode = EditorGUILayout.Popup(Styles.bakingMode, m_SingleSceneMode ? 0 : 1, Styles.bakingModeOptions) == 0;
             if (EditorGUI.EndChangeCheck() && !m_SingleSceneMode)
             {
-                if (activeSet != null) { EditorUtility.SetDirty(activeSet); activeSet.singleSceneMode = false; }
+                if (activeSet != null)
+                {
+                    EditorUtility.SetDirty(activeSet);
+                    activeSet.singleSceneMode = false;
+                }
                 SaveTempBakingSetIfNeeded();
             }
 
@@ -351,12 +357,18 @@ namespace UnityEngine.Rendering
                 return;
             }
 
-            EditorGUI.BeginChangeCheck();
             var newSet = ObjectFieldWithNew(Styles.currentBakingSet, activeSet, CreateBakingSet);
-            if (EditorGUI.EndChangeCheck())
+            if (newSet != activeSet)
             {
-                if (newSet != null) { EditorUtility.SetDirty(newSet); newSet.singleSceneMode = false; }
+                if (newSet != null)
+                {
+                    EditorUtility.SetDirty(newSet);
+                    newSet.singleSceneMode = false;
+                }
                 activeSet = newSet;
+
+                ProbeReferenceVolume.instance.Clear();
+                ProbeReferenceVolume.instance.SetActiveBakingSet(newSet);
             }
 
             if (activeSet != null)
@@ -424,7 +436,7 @@ namespace UnityEngine.Rendering
         {
             for (int i = 0; i < SceneManager.sceneCount; i++)
             {
-                var scene = SceneManager.GetSceneAt(i);
+                Scene scene = SceneManager.GetSceneAt(i);
                 if (scene.isLoaded && ProbeVolumeBakingSet.GetBakingSetForScene(scene) != activeSet)
                     scenesToUnload.Add(scene);
             }
@@ -463,7 +475,7 @@ namespace UnityEngine.Rendering
                             if (scenesToUnload.All(s => !s.isDirty) || EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo())
                             {
                                 foreach (var scene in scenesToUnload)
-                                    EditorSceneManager.CloseScene(scene, false);
+                                    EditorSceneManager.CloseScene(scene, string.IsNullOrEmpty(scene.path)); // Remove the scene from the hierarchy iff it has never been saved.
                             }
                             break;
                     }
@@ -491,7 +503,7 @@ namespace UnityEngine.Rendering
                 set = ScriptableObject.CreateInstance<ProbeVolumeBakingSet>();
                 set.SetDefaults();
 
-                ProbeReferenceVolume.instance.AddPendingSceneRemoval(sceneGUID);
+                ProbeReferenceVolume.instance.Clear();
             }
 
             EditorUtility.SetDirty(set);
@@ -510,7 +522,9 @@ namespace UnityEngine.Rendering
             string path = string.IsNullOrEmpty(scene.path) ?
                 ProbeVolumeBakingSet.GetDirectory("Assets/", "Untitled") :
                 ProbeVolumeBakingSet.GetDirectory(scene.path, scene.name);
-            path = System.IO.Path.Combine(path, activeSet.name + ".asset");
+            if (!Directory.Exists(path))
+                Directory.CreateDirectory(path);
+            path = Path.Combine(path, activeSet.name + ".asset");
             path = AssetDatabase.GenerateUniqueAssetPath(path);
 
             AssetDatabase.CreateAsset(activeSet, path);
@@ -784,10 +798,14 @@ namespace UnityEngine.Rendering
                 // Find the set in which the new active scene belongs
                 var set = ProbeVolumeBakingSet.GetBakingSetForScene(scene);
 
-                if (set != null)
-                {
-                    activeSet = set;
+                activeSet = set;
 
+                if (set == null)
+                {
+                    m_SingleSceneMode = true;
+                }
+                else
+                {
                     // If we load a new scene that doesn't have the current scenario, change it
                     if (!set.m_LightingScenarios.Contains(prv.lightingScenario))
                         prv.SetActiveScenario(set.m_LightingScenarios[0], false);
@@ -949,11 +967,13 @@ namespace UnityEngine.Rendering
             return (bool)k_Lightmapping_BakeAllReflectionProbesSnapshots.Invoke(null, null);
         }
 
-        internal bool PrepareAPVBake()
+        internal bool PrepareAPVBake(ProbeReferenceVolume prv)
         {
-            var prv = ProbeReferenceVolume.instance;
             if (!prv.isInitialized || !prv.enabledBySRP)
                 return false;
+
+            // Always baking with a fresh activeSet
+            activeSet = null;
 
             // In case UI was never opened we have to setup some stuff
             FindActiveSet();
@@ -971,9 +991,11 @@ namespace UnityEngine.Rendering
             {
                 if(!activeSet.DialogNoProbeVolumeInSetShown())
                 {
-                    if(EditorUtility.DisplayDialog("No Adaptive Probe Volume in Scene", "Adaptive Probe Volumes are enabled for this Project, but none exist in the Scene.\n\n" +
-                        "Do you wish to add an Adaptive Probe Volume to the Active Scene?", "Yes", "No"))
-                        CreateProbeVolume();
+                    if (!Application.isBatchMode)
+                        if (EditorUtility.DisplayDialog("No Adaptive Probe Volume in Scene",
+                                "Adaptive Probe Volumes are enabled for this Project, but none exist in the Scene.\n\n" +
+                                "Do you wish to add an Adaptive Probe Volume to the Active Scene?", "Yes", "No"))
+                            CreateProbeVolume();
                     activeSet.SetDialogNoProbeVolumeInSetShown(true);
                 }
             }
@@ -981,7 +1003,13 @@ namespace UnityEngine.Rendering
             {
                 if (GetFirstProbeVolumeInNonActiveScene() != null)
                 {
-                    int res = EditorUtility.DisplayDialogComplex("Create Baking Set?", "You are using the Single Scene Baking Mode and have more than one Scene loaded. It is not possible to generate lighting.\n\n" +
+                    const string warning = "You are using the Single Scene Baking Mode and have more than one Scene loaded. It is not possible to generate lighting.";
+                    if (Application.isBatchMode)
+                    {
+                        Debug.LogWarning(warning + " Consider creating a Baking Set.");
+                        return false;
+                    }
+                    int res = EditorUtility.DisplayDialogComplex("Create Baking Set?", warning + "\n\n" +
                         "Do you want to create a Baking Set instead?", "Yes", "Cancel", "Bake anyway");
                     if (res == 0)
                         ConvertTempBakingSet();
@@ -1012,7 +1040,7 @@ namespace UnityEngine.Rendering
             if (AdaptiveProbeVolumes.partialBakeSceneList.Count == activeSet.sceneGUIDs.Count)
                 AdaptiveProbeVolumes.partialBakeSceneList = null;
 
-            if (ProbeReferenceVolume.instance.supportLightingScenarios && !activeSet.m_LightingScenarios.Contains(activeSet.lightingScenario))
+            if (prv.supportLightingScenarios && !activeSet.m_LightingScenarios.Contains(activeSet.lightingScenario) && activeSet.m_LightingScenarios.Count > 0)
                 activeSet.SetActiveScenario(activeSet.m_LightingScenarios[0], false);
 
             // Layout has changed and is incompatible.
@@ -1020,14 +1048,26 @@ namespace UnityEngine.Rendering
             {
                 if (AdaptiveProbeVolumes.partialBakeSceneList != null)
                 {
-                    if (EditorUtility.DisplayDialog("Incompatible Layout", "You are partially baking the set with an incompatible cell layout. Proceeding will invalidate all previously bake data.\n\n" + "Do you wish to continue?", "Yes", "No"))
+                    const string warning = "You are partially baking the set with an incompatible cell layout.";
+                    if (Application.isBatchMode)
+                    {
+                        Debug.LogWarning(warning);
+                        return false;
+                    }
+                    if (EditorUtility.DisplayDialog("Incompatible Layout", warning + " Proceeding will invalidate all previously bake data.\n\n" + "Do you wish to continue?", "Yes", "No"))
                         ClearBakedData();
                     else
                         return false;
                 }
-                else if (ProbeReferenceVolume.instance.supportLightingScenarios && activeSet.scenarios.Count != (activeSet.scenarios.ContainsKey(activeSet.lightingScenario) ? 1 : 0))
+                else if (prv.supportLightingScenarios && activeSet.scenarios.Count != (activeSet.scenarios.ContainsKey(activeSet.lightingScenario) ? 1 : 0))
                 {
-                    if (EditorUtility.DisplayDialog("Incompatible Layout", "You are baking scenarios with incompatible cell layouts. Proceeding will invalidate all previously bake data.\n\n" + "Do you wish to continue?", "Yes", "No"))
+                    const string warning = "You are baking scenarios with incompatible cell layouts.";
+                    if (Application.isBatchMode)
+                    {
+                        Debug.LogWarning(warning);
+                        return false;
+                    }
+                    if (EditorUtility.DisplayDialog("Incompatible Layout", warning + " Proceeding will invalidate all previously bake data.\n\n" + "Do you wish to continue?", "Yes", "No"))
                         ClearBakedData();
                     else
                         return false;

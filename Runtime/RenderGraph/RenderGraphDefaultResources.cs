@@ -39,22 +39,61 @@ namespace UnityEngine.Rendering.RenderGraphModule
 
         internal RenderGraphDefaultResources()
         {
-            m_BlackTexture2D = RTHandles.Alloc(Texture2D.blackTexture);
-            m_WhiteTexture2D = RTHandles.Alloc(Texture2D.whiteTexture);
-            m_ShadowTexture2D = RTHandles.Alloc(1, 1, Experimental.Rendering.GraphicsFormat.D32_SFloat, isShadowMap: true, name: "DefaultShadowTexture");
-            m_ShadowTextureArray2D = RTHandles.Alloc(1, 1, dimension: TextureDimension.Tex2DArray, depthBufferBits: DepthBits.Depth32, isShadowMap: true, name: "DefaultShadowTexture");
+            InitDefaultResourcesIfNeeded();
+        }
+
+        private void InitDefaultResourcesIfNeeded()
+        {
+            if (m_BlackTexture2D == null)
+                m_BlackTexture2D = RTHandles.Alloc(Texture2D.blackTexture);
+
+            if (m_WhiteTexture2D == null)
+                m_WhiteTexture2D = RTHandles.Alloc(Texture2D.whiteTexture);
+
+            if (m_ShadowTexture2D == null)
+            {
+                m_ShadowTexture2D = RTHandles.Alloc(1, 1, CoreUtils.GetDefaultDepthOnlyFormat(), isShadowMap: true, name: "DefaultShadowTexture");
+
+                // Fill the shadow texture with the default (far-plane) depth value for the current platform.
+                CommandBuffer cmd = CommandBufferPool.Get();
+                cmd.SetRenderTarget(m_ShadowTexture2D);
+                cmd.ClearRenderTarget(RTClearFlags.All, Color.white);
+                Graphics.ExecuteCommandBuffer(cmd);
+                CommandBufferPool.Release(cmd);
+            }
+
+            // DanbaidongRP: 1x1 shadow map array, bound when a shadow array pass is skipped.
+            if (m_ShadowTextureArray2D == null)
+            {
+                m_ShadowTextureArray2D = RTHandles.Alloc(1, 1, CoreUtils.GetDefaultDepthOnlyFormat(), dimension: TextureDimension.Tex2DArray, isShadowMap: true, name: "DefaultShadowArrayTexture");
+
+                CommandBuffer cmd = CommandBufferPool.Get();
+                cmd.SetRenderTarget(m_ShadowTextureArray2D.nameID, 0, CubemapFace.Unknown, 0);
+                cmd.ClearRenderTarget(RTClearFlags.All, Color.white);
+                Graphics.ExecuteCommandBuffer(cmd);
+                CommandBufferPool.Release(cmd);
+            }
         }
 
         internal void Cleanup()
         {
-            m_BlackTexture2D.Release();
-            m_WhiteTexture2D.Release();
-            m_ShadowTexture2D.Release();
-            m_ShadowTextureArray2D.Release();
+            m_BlackTexture2D?.Release();
+            m_BlackTexture2D = null;
+
+            m_WhiteTexture2D?.Release();
+            m_WhiteTexture2D = null;
+
+            m_ShadowTexture2D?.Release();
+            m_ShadowTexture2D = null;
+
+            m_ShadowTextureArray2D?.Release();
+            m_ShadowTextureArray2D = null;
         }
 
         internal void InitializeForRendering(RenderGraph renderGraph)
         {
+            InitDefaultResourcesIfNeeded();
+
             blackTexture = renderGraph.ImportTexture(m_BlackTexture2D, true);
             whiteTexture = renderGraph.ImportTexture(m_WhiteTexture2D, true);
             defaultShadowTexture = renderGraph.ImportTexture(m_ShadowTexture2D, true);

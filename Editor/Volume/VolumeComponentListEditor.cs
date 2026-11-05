@@ -155,6 +155,8 @@ namespace UnityEditor.Rendering
             else
                 m_Editors[index] = editor;
 
+            FilterEditorsBySearch();
+
             DocumentationUtils.TryGetHelpURL(component.GetType(), out string helpUrl);
             helpUrl ??= string.Empty;
             m_VolumeComponentHelpUrls[editor] = helpUrl;
@@ -202,7 +204,8 @@ namespace UnityEditor.Rendering
             // Recreate editors for existing settings, if any
             var components = asset.components;
             for (int i = 0; i < components.Count; i++)
-                CreateEditor(components[i], m_ComponentsProperty.GetArrayElementAtIndex(i));
+                if (components[i] != null) //can happens if a component type is removed and opening old serialized data
+                    CreateEditor(components[i], m_ComponentsProperty.GetArrayElementAtIndex(i));
 
             m_CurrentHashCode = asset.GetComponentListHashCode();
 
@@ -221,9 +224,22 @@ namespace UnityEditor.Rendering
             asset = null;
         }
 
+        readonly HashSet<VolumeComponentEditor> m_CurrentSearchFilteredEditors = new();
+        void FilterEditorsBySearch()
+        {
+            m_CurrentSearchFilteredEditors.Clear();
+            if (string.IsNullOrEmpty(m_SearchString)) return;
+
+            foreach (var editor in m_Editors)
+            {
+                if (MatchesSearchString(editor.GetDisplayTitle().text))
+                    m_CurrentSearchFilteredEditors.Add(editor);
+            }
+        }
+        bool EditorIsIncludedInCurrentSearch(VolumeComponentEditor editor) => string.IsNullOrEmpty(m_SearchString) || m_CurrentSearchFilteredEditors.Contains(editor);
         bool MatchesSearchString(string title)
         {
-            return m_SearchString.Length == 0 || title.Contains(m_SearchString, StringComparison.OrdinalIgnoreCase);
+            return string.IsNullOrEmpty(m_SearchString) || title.Contains(m_SearchString, StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>
@@ -236,11 +252,14 @@ namespace UnityEditor.Rendering
 
             // Even if the asset is not dirty, the list of component may have been changed by another inspector.
             // In this case, only the hash will tell us that we need to refresh.
-            if (asset.isDirty || asset.GetComponentListHashCode() != m_CurrentHashCode)
+            if (asset.dirtyState != VolumeProfile.DirtyState.None || asset.GetComponentListHashCode() != m_CurrentHashCode)
             {
                 RefreshEditors();
                 VolumeManager.instance.OnVolumeProfileChanged(asset);
-                asset.isDirty = false;
+
+                if ((asset.dirtyState & VolumeProfile.DirtyState.DirtyByProfileReset) != 0)
+                    UnityEditorInternal.InternalEditorUtility.RepaintAllViews();
+                asset.dirtyState = VolumeProfile.DirtyState.None;
             }
 
             if (m_IsDefaultVolumeProfile && VolumeManager.instance.isInitialized && m_EditorsByCategory.Count == 0)
@@ -259,7 +278,7 @@ namespace UnityEditor.Rendering
                 {
                     if (!editor.visible)
                         return false;
-                    return MatchesSearchString(editor.GetDisplayTitle().text);
+                    return EditorIsIncludedInCurrentSearch(editor);
                 }
 
                 void DrawEditor(VolumeComponentEditor editor, int index = -1)
@@ -306,7 +325,11 @@ namespace UnityEditor.Rendering
                 {
                     Rect searchRect = GUILayoutUtility.GetRect(50, EditorGUIUtility.singleLineHeight);
                     searchRect.width -= 2;
-                    m_SearchString = m_SearchField.OnGUI(searchRect, m_SearchString);
+                    using (var check = new EditorGUI.ChangeCheckScope())
+                    {
+                        m_SearchString = m_SearchField.OnGUI(searchRect, m_SearchString);
+                        if (check.changed) FilterEditorsBySearch();
+                    }
                     GUILayout.Space(2);
 
                     EditorGUILayout.HelpBox(
@@ -342,7 +365,6 @@ namespace UnityEditor.Rendering
 
                         for (int i = 0; i < editors.Count; i++)
                             DrawEditor(editors[i]);
-
                         GUILayout.Space(8);
                     }
                 }
@@ -445,13 +467,14 @@ namespace UnityEditor.Rendering
             if (!m_IsDefaultVolumeProfile)
                 menu.AddItem(EditorGUIUtility.TrTextContent("Remove"), false, () => RemoveComponent(id));
 
-            menu.AddSeparator(string.Empty);
 
             if (targetEditor.hasAdditionalProperties)
+            {
+                menu.AddSeparator(string.Empty);
                 menu.AddAdvancedPropertiesBoolMenuItem(() => targetEditor.showAdditionalProperties,
                                                        () => targetEditor.showAdditionalProperties ^= true);
+            }
 
-            menu.AddSeparator(string.Empty);
             targetEditor.AddDefaultProfileContextMenuEntries(menu, VolumeManager.instance.globalDefaultProfile,
                 () => VolumeProfileUtils.CopyValuesToProfile(targetComponent, VolumeManager.instance.globalDefaultProfile));
 
@@ -466,7 +489,7 @@ namespace UnityEditor.Rendering
             if (VolumeComponentCopyPaste.CanPaste(targetComponent))
                 menu.AddItem(EditorGUIUtility.TrTextContent("Paste Settings"), false, () =>
                 {
-                    VolumeComponentCopyPaste.PasteSettings(targetComponent);
+                    VolumeComponentCopyPaste.PasteSettings(targetComponent, asset);
                     VolumeManager.instance.OnVolumeProfileChanged(asset);
                 });
             else

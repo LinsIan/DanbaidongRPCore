@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using UnityEngine.Rendering.RenderGraphModule;
 
 namespace UnityEngine.Rendering
@@ -51,6 +52,11 @@ namespace UnityEngine.Rendering
                     displayName: disposableSettingsPanel.PanelName,
                     createIfNull: true,
                     groupIndex: (disposableSettingsPanel is DebugDisplaySettingsPanel debugDisplaySettingsPanel) ? debugDisplaySettingsPanel.Order : 0);
+#if UNITY_EDITOR
+
+                if (DocumentationUtils.TryGetHelpURL(disposableSettingsPanel.GetType(), out var documentationUrl))
+                    panel.documentationUrl = documentationUrl;
+#endif
 
                 ObservableList<DebugUI.Widget> panelChildren = panel.children;
 

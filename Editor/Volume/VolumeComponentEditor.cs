@@ -106,7 +106,7 @@ namespace UnityEditor.Rendering
         /// The copy of the serialized property of the <see cref="VolumeComponent"/> being
         /// inspected. Unity uses this to track whether the editor is collapsed in the Inspector or not.
         /// </summary>
-        [Obsolete("Please use expanded property instead. #from(2022.2)", false)]
+        [Obsolete("Please use expanded property instead. #from(2022.2)")]
         public SerializedProperty baseProperty { get; internal set; }
 
         /// <summary>
@@ -122,7 +122,7 @@ namespace UnityEditor.Rendering
         /// <summary>
         /// Override this property if your editor makes use of the "Additional Properties" feature.
         /// </summary>
-        public virtual bool hasAdditionalProperties => volumeComponent.parameterList.Count != m_VolumeNotAdditionalParameters.Count;
+        public virtual bool hasAdditionalProperties => volumeComponent.parameterList.Length != m_VolumeNotAdditionalParameters.Count;
 
         /// <summary>
         /// Set to true to show additional properties.
@@ -196,7 +196,6 @@ namespace UnityEditor.Rendering
 
         static Dictionary<Type, VolumeParameterDrawer> s_ParameterDrawers;
         SupportedOnRenderPipelineAttribute m_SupportedOnRenderPipelineAttribute;
-        Type[] m_LegacyPipelineTypes;
 
         static VolumeComponentEditor()
         {
@@ -274,18 +273,6 @@ namespace UnityEditor.Rendering
 
             var volumeComponentType = volumeComponent.GetType();
             m_SupportedOnRenderPipelineAttribute = volumeComponentType.GetCustomAttribute<SupportedOnRenderPipelineAttribute>();
-
-#pragma warning disable CS0618
-            var supportedOn = volumeComponentType.GetCustomAttribute<VolumeComponentMenuForRenderPipeline>();
-            m_LegacyPipelineTypes = supportedOn != null ? supportedOn.pipelineTypes : Array.Empty<Type>();
-#pragma warning restore CS0618
-
-            EditorApplication.contextualPropertyMenu += OnPropertyContextMenu;
-        }
-
-        void OnDestroy()
-        {
-            EditorApplication.contextualPropertyMenu -= OnPropertyContextMenu;
         }
 
         internal void DetermineVisibility(Type renderPipelineAssetType, Type renderPipelineType)
@@ -299,12 +286,6 @@ namespace UnityEditor.Rendering
             if (m_SupportedOnRenderPipelineAttribute != null)
             {
                 visible = m_SupportedOnRenderPipelineAttribute.GetSupportedMode(renderPipelineAssetType) != SupportedOnRenderPipelineAttribute.SupportedMode.Unsupported;
-                return;
-            }
-
-            if (renderPipelineType != null && m_LegacyPipelineTypes.Length > 0)
-            {
-                visible = m_LegacyPipelineTypes.Contains(renderPipelineType);
                 return;
             }
 
@@ -393,21 +374,11 @@ namespace UnityEditor.Rendering
                 profile != null &&
                 defaultProfile != profile)
             {
+                menu.AddSeparator(string.Empty);
                 menu.AddItem(EditorGUIUtility.TrTextContent($"Show Default Volume Profile"), false,
                     () => Selection.activeObject = defaultProfile);
                 menu.AddItem(EditorGUIUtility.TrTextContent($"Apply Values to Default Volume Profile"), false, copyAction);
             }
-        }
-
-        void OnPropertyContextMenu(GenericMenu menu, SerializedProperty property)
-        {
-            if (property.serializedObject.targetObject != target)
-                return;
-
-            var targetComponent = property.serializedObject.targetObject as VolumeComponent;
-
-            AddDefaultProfileContextMenuEntries(menu, VolumeManager.instance.globalDefaultProfile,
-                () => VolumeProfileUtils.AssignValuesToProfile(VolumeManager.instance.globalDefaultProfile, targetComponent, property));
         }
 
         /// <summary>
@@ -457,6 +428,7 @@ namespace UnityEditor.Rendering
             }
         }
 
+        GUIContent m_DisplayTitle;
         /// <summary>
         /// Sets the label for the component header. Override this method to provide
         /// a custom label. If you don't, Unity automatically obtains one from the class name.
@@ -464,8 +436,19 @@ namespace UnityEditor.Rendering
         /// <returns>A label to display in the component header.</returns>
         public virtual GUIContent GetDisplayTitle()
         {
-            var title = string.IsNullOrEmpty(volumeComponent.displayName) ? ObjectNames.NicifyVariableName(volumeComponent.GetType().Name) : volumeComponent.displayName;
-            return EditorGUIUtility.TrTextContent(title, string.Empty);
+            if (m_DisplayTitle != null) return m_DisplayTitle;
+
+            var volumeComponentType = volumeComponent.GetType();
+            var displayInfo = volumeComponentType.GetCustomAttribute<DisplayInfoAttribute>();
+            if (displayInfo != null && !string.IsNullOrWhiteSpace(displayInfo.name))
+                return m_DisplayTitle = EditorGUIUtility.TrTextContent(displayInfo.name, string.Empty);
+
+            #pragma warning disable CS0618
+            if (!string.IsNullOrWhiteSpace(volumeComponent.displayName))
+                return m_DisplayTitle = EditorGUIUtility.TrTextContent(volumeComponent.displayName, string.Empty);
+            #pragma warning restore CS0618
+
+            return m_DisplayTitle = EditorGUIUtility.TrTextContent(ObjectNames.NicifyVariableName(volumeComponentType.Name), string.Empty);
         }
 
         void AddToggleState(GUIContent content, bool state)
@@ -520,7 +503,7 @@ namespace UnityEditor.Rendering
 
         internal bool AreAllOverridesTo(bool state)
         {
-            for (int i = 0; i < volumeComponent.parameterList.Count; ++i)
+            for (int i = 0; i < volumeComponent.parameterList.Length; ++i)
             {
                 if (volumeComponent.parameterList[i].overrideState != state)
                     return false;
@@ -743,8 +726,22 @@ namespace UnityEditor.Rendering
         /// <param name="property">The property to draw the override checkbox for</param>
         protected void DrawOverrideCheckbox(SerializedDataParameter property)
         {
+            DrawOverrideCheckbox(property, null);
+        }
+
+        /// <summary>
+        /// Draws the override checkbox used by a property in the editor.
+        /// </summary>
+        /// <param name="property">The property to draw the override checkbox for</param>
+        /// <param name="drawer">The <see cref="VolumeParameterDrawer"/> instance responsible for
+        /// drawing the <paramref name="property"/>. This is used to get the correct element height
+        /// via <see cref="VolumeParameterDrawer.GetElementHeight(SerializedDataParameter)"/>. Can be <c>null</c>, in which
+        /// case the default property height is used.</param>
+        protected void DrawOverrideCheckbox(SerializedDataParameter property, VolumeParameterDrawer drawer)
+        {
             // Create a rect the height + vspacing of the property that is being overriden
-            float height = EditorGUI.GetPropertyHeight(property.value) + EditorGUIUtility.standardVerticalSpacing;
+            float elementHeight = drawer?.GetElementHeight(property) ?? EditorGUI.GetPropertyHeight(property.value);
+            float height = elementHeight + EditorGUIUtility.standardVerticalSpacing;
             var overrideRect = GUILayoutUtility.GetRect(Styles.k_AllText, CoreEditorStyles.miniLabelButton, GUILayout.Height(height),
                 GUILayout.Width(Styles.overrideCheckboxWidth + Styles.overrideCheckboxOffset), GUILayout.ExpandWidth(false));
 
@@ -855,7 +852,7 @@ namespace UnityEditor.Rendering
                     {
                         EditorGUILayout.BeginHorizontal();
                         if (editor.enableOverrides)
-                            editor.DrawOverrideCheckbox(property);
+                            editor.DrawOverrideCheckbox(property, drawer);
 
                         disabledScope = new EditorGUI.DisabledScope(!property.overrideState.boolValue);
                     }
